@@ -59,6 +59,7 @@ export class R2Adapter implements OnModuleInit {
         accessKeyId,
         secretAccessKey,
       },
+      requestChecksumCalculation: 'WHEN_REQUIRED',
       requestHandler: {
         requestTimeout: 5000,
       },
