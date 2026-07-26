@@ -52,7 +52,7 @@ export class StorageController {
    * Generate a presigned download URL.
    * Client then GETs the file bytes directly from the returned downloadUrl.
    */
-  @Get('files/:key')
+  @Get('files/:key(.*)')
   @RequirePermission('storage', 'read')
   async readFile(
     @Req() request: AuthenticatedRequest,
@@ -77,7 +77,7 @@ export class StorageController {
    * Generate a presigned URL to replace/overwrite an existing file.
    * Client then PUTs the new file bytes directly to the returned uploadUrl.
    */
-  @Patch('files/:key')
+  @Patch('files/:key(.*)')
   @RequirePermission('storage', 'modify')
   async modifyFile(
     @Req() request: AuthenticatedRequest,
@@ -102,7 +102,7 @@ export class StorageController {
    * DELETE /v1/storage/files/:key
    * Delete a file from R2.
    */
-  @Delete('files/:key')
+  @Delete('files/:key(.*)')
   @RequirePermission('storage', 'delete')
   async deleteFile(
     @Req() request: AuthenticatedRequest,
