@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit, ForbiddenException } from '@nestjs/common';
+import { Injectable, OnModuleInit } from '@nestjs/common';
 import {
   S3Client,
   PutObjectCommand,
@@ -215,7 +215,7 @@ export class R2Adapter implements OnModuleInit {
   validateKeyOwnership(key: string, projectId: string): void {
     const expectedPrefix = `${projectId}/uploads/`;
     if (!key.startsWith(expectedPrefix)) {
-      throw new ForbiddenException(
+      throw new Error(
         `Access denied: key "${key}" does not belong to project "${projectId}"`,
       );
     }

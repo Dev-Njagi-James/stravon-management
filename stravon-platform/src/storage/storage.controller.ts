@@ -35,6 +35,7 @@ export class StorageController {
     @Req() request: AuthenticatedRequest,
     @Body() body: { filename: string; contentType: string; fileSize?: number },
   ): Promise<PresignedUploadResult> {
+    console.log('DEBUG createFile body:', JSON.stringify(body), 'headers:', request.headers['content-type']);
     request.storage_metadata = {
       bytes: body.fileSize,
       bytes_direction: 'upload',
