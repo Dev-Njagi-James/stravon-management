@@ -6,20 +6,21 @@ This file tracks **where the project is right now** and **where it's going next*
 
 ## Where We Are: Phase 0 — Setup
 
-| Item | Status |
-|---|---|
-| NestJS project initialized | Done |
-| Repo pushed to GitHub (`stravon-management`, nested at `stravon-platform/`) | Done |
-| Render Web Service, Root Directory set to `stravon-platform` | Done |
-| Empty app deployed, live at `stravon-management.onrender.com` | Done |
-| Supabase project created | Done |
-| `projects` table (renamed from `projects_table`) | Done |
-| `call_logs` table created, FK to `projects` confirmed | Done |
-| `SUPABASE_URL` set (local + Render) | Done |
-| `SUPABASE_SERVICE_ROLE_KEY` set (local + Render) | Done |
-| `.gitignore` excludes `.env*` | Open — currently only `.env`, missing the wildcard |
-| `CLERK_SECRET_KEY` set (local + Render) | Done |
-| `CLERK_PUBLISHABLE_KEY` set (local + Render) | Done |
+| Item                                                                        | Status                                              |
+| --------------------------------------------------------------------------- | --------------------------------------------------- |
+| NestJS project initialized                                                  | Done                                                |
+| Repo pushed to GitHub (`stravon-management`, nested at `stravon-platform/`) | Done                                                |
+| Render Web Service, Root Directory set to `stravon-platform`                | Done                                                |
+| Empty app deployed, live at `stravon-management.onrender.com`               | Done                                                |
+| Supabase project created                                                    | Done                                                |
+| `projects` table (renamed from `projects_table`)                            | Done                                                |
+| `call_logs` table created, FK to `projects` confirmed                       | Done                                                |
+| `project_users` table created (maps Clerk user → owning project)            | Open — new item, added for user-ownership isolation |
+| `SUPABASE_URL` set (local + Render)                                         | Done                                                |
+| `SUPABASE_SERVICE_ROLE_KEY` set (local + Render)                            | Done                                                |
+| `.gitignore` excludes `.env*`                                               | Open — currently only `.env`, missing the wildcard  |
+| `CLERK_SECRET_KEY` set (local + Render)                                     | Done                                                |
+| `CLERK_PUBLISHABLE_KEY` set (local + Render)                                | Done                                                |
 
 ### Open item: `.gitignore` wildcard
 
@@ -41,6 +42,7 @@ Build order:
    - `POST /v1/auth/users` → `create`
    - `PATCH /v1/auth/users/:id` → `modify`
    - `DELETE /v1/auth/users/:id` → `delete`
+   - `POST` also inserts into `project_users`. `GET`/`PATCH`/`DELETE` must verify the `clerk_user_id` belongs to the calling project via `project_users` before proceeding.
 5. **In-process permission cache** — 60s TTL, in-memory only, no Redis.
 6. **Timeout/failure handling** — 5s hard timeout on every Clerk call, no retries, immediate error return on failure.
 

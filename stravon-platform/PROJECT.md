@@ -37,45 +37,65 @@ Platform database is a **dedicated Supabase project**, separate from any client 
 
 ### `projects` table
 
-| Column | Type | Notes |
-|---|---|---|
-| project_id | uuid, PK | |
-| name | text | |
-| owner | text | |
-| category | text | `'single_client'` or `'saas_tenant'` |
-| tier | text | `'entry'` / `'starter'` / `'growth'` / `'scale'` |
-| permissions | jsonb | see Permissions Model below |
-| api_key_hash | text | store a hash, never the raw key |
-| created_at | timestamp | default now() |
+| Column       | Type      | Notes                                            |
+| ------------ | --------- | ------------------------------------------------ |
+| project_id   | uuid, PK  |                                                  |
+| name         | text      |                                                  |
+| owner        | text      |                                                  |
+| category     | text      | `'single_client'` or `'saas_tenant'`             |
+| tier         | text      | `'entry'` / `'starter'` / `'growth'` / `'scale'` |
+| permissions  | jsonb     | see Permissions Model below                      |
+| api_key_hash | text      | store a hash, never the raw key                  |
+| created_at   | timestamp | default now()                                    |
 
 ### `call_logs` table
 
-| Column | Type | Notes |
-|---|---|---|
-| project_id | uuid, FK → projects | |
-| service | text | `'storage'` / `'auth'` / `'db'` |
-| action | text | `'read'` / `'create'` / `'modify'` / `'delete'` |
-| status | text | `'success'` / `'error'` |
-| latency_ms | integer | |
-| bytes | integer | nullable, storage calls only |
-| bytes_direction | text | `'upload'` / `'download'`, nullable |
-| created_at | timestamp | default now() |
+| Column          | Type                | Notes                                           |
+| --------------- | ------------------- | ----------------------------------------------- |
+| project_id      | uuid, FK → projects |                                                 |
+| service         | text                | `'storage'` / `'auth'` / `'db'`                 |
+| action          | text                | `'read'` / `'create'` / `'modify'` / `'delete'` |
+| status          | text                | `'success'` / `'error'`                         |
+| latency_ms      | integer             |                                                 |
+| bytes           | integer             | nullable, storage calls only                    |
+| bytes_direction | text                | `'upload'` / `'download'`, nullable             |
+| created_at      | timestamp           | default now()                                   |
 
 `call_logs` is not just an audit trail — it's the source data for per-project storage metering (Phase 3) and usage numbers on a client app's own admin dashboard.
+
+### `project_users` table
+
+Maps a Clerk user record to the project that owns it. Without this, any project's API key could read/update/delete any other project's user by guessing a Clerk `user_id` — there is no ownership boundary otherwise.
+
+| Column        | Type                | Notes                                                                                               |
+| ------------- | ------------------- | --------------------------------------------------------------------------------------------------- |
+| id            | uuid, PK            | default gen_random_uuid()                                                                           |
+| project_id    | uuid, FK → projects | which project owns this user                                                                        |
+| clerk_user_id | text                | Clerk's own user id                                                                                 |
+| app_metadata  | jsonb, nullable     | per-project extra fields (role, tier, custom access levels) — never touches Clerk's own user object |
+| created_at    | timestamp           | default now()                                                                                       |
+
+Unique constraint on `(project_id, clerk_user_id)` — one mapping per user per project.
+
+Every Phase 1 user route (`GET/POST/PATCH/DELETE /v1/auth/users/:id`) must check this table: does the `clerk_user_id` in the request belong to the `project_id` resolved from the API key? If not, reject (403/404) — do not trust the URL param alone.
 
 ## Permissions Model
 
 Stored as JSONB on `projects.permissions`. Not a separate relational table — unnecessary overhead at current scale.
 
 ```json
-{ "storage": ["read", "create", "modify", "delete"], "auth": ["read"], "db": [] }
+{
+  "storage": ["read", "create", "modify", "delete"],
+  "auth": ["read"],
+  "db": []
+}
 ```
 
-| Service | Read | Create | Modify | Delete |
-|---|---|---|---|---|
-| Storage | Download/view file | Upload file | Replace/rename file | Delete file |
-| Auth | Read user data | Create user | Update user profile | Delete user |
-| DB (later) | Query record | Insert record | Update record | Delete record |
+| Service    | Read               | Create        | Modify              | Delete        |
+| ---------- | ------------------ | ------------- | ------------------- | ------------- |
+| Storage    | Download/view file | Upload file   | Replace/rename file | Delete file   |
+| Auth       | Read user data     | Create user   | Update user profile | Delete user   |
+| DB (later) | Query record       | Insert record | Update record       | Delete record |
 
 **Do not build row-level (authenticated vs. non-authenticated user) granularity** — that's deferred until a second project's requirements demand it.
 
@@ -91,6 +111,7 @@ Match verb semantics per service — Read/Create/Modify/Delete mean different co
    - `POST /v1/auth/users` → `create`
    - `PATCH /v1/auth/users/:id` → `modify`
    - `DELETE /v1/auth/users/:id` → `delete`
+   - `POST` inserts a `project_users` row (`project_id`, `clerk_user_id`) alongside the Clerk create call. `GET`/`PATCH`/`DELETE` must first confirm the `clerk_user_id` in the URL belongs to the calling project's `project_id` via `project_users` — reject with 403/404 if it doesn't.
 5. **In-process permission cache**: cache each project's `permissions` in memory, TTL 60s. No external cache service.
 6. **Timeouts/failure handling**: 5s hard timeout on every Clerk call. On timeout or error, return a clear error immediately — no retries.
 
@@ -115,12 +136,12 @@ Match verb semantics per service — Read/Create/Modify/Delete mean different co
 
 ## Hosting
 
-| Component | Where | Notes |
-|---|---|---|
-| NestJS backend | Render (free tier now → Starter $7/mo at upgrade trigger) | Always-on eventually — client apps depend on this synchronously |
-| Platform database | Supabase (free tier) | Separate project from any client app's own Supabase instance |
-| File storage (Phase 2) | Cloudflare R2 | Single bucket, prefix-isolated per project |
-| Client app frontend | Vercel (separate deployment) | Calls the platform backend via API key — never calls R2/Clerk directly |
+| Component              | Where                                                     | Notes                                                                  |
+| ---------------------- | --------------------------------------------------------- | ---------------------------------------------------------------------- |
+| NestJS backend         | Render (free tier now → Starter $7/mo at upgrade trigger) | Always-on eventually — client apps depend on this synchronously        |
+| Platform database      | Supabase (free tier)                                      | Separate project from any client app's own Supabase instance           |
+| File storage (Phase 2) | Cloudflare R2                                             | Single bucket, prefix-isolated per project                             |
+| Client app frontend    | Vercel (separate deployment)                              | Calls the platform backend via API key — never calls R2/Clerk directly |
 
 **Render free tier limits:** 750 free instance-hours/month, 100GB outbound bandwidth/month shared across workspace. Free web services spin down after 15 min inactivity (30-60s cold start on next request). Exceeding limits suspends free services until next calendar month — no charge unless a payment method is on file and bandwidth is exceeded.
 
@@ -128,18 +149,18 @@ Match verb semantics per service — Read/Create/Modify/Delete mean different co
 
 ## Full Build Phases (reference — only Phase 0/1 in scope now)
 
-| Phase | Scope | Depends On |
-|---|---|---|
-| 0 | Schema finalized, Supabase project created, secrets set, empty app deployed | — |
-| 1 | AuthModule: guard, Clerk adapter, `/v1/auth/*`, call logging | Phase 0 |
-| 2 | StorageModule: R2 adapter, prefix isolation, `/v1/storage/*`, byte + direction logging | Phase 0, reuses Phase 1's guard/interceptor |
-| 3 | Metering: sum `call_logs.bytes` per project against pricing tiers, 80/90/100% thresholds, overage calc | Phase 2 |
-| 4 | Rate limiting: per-project token bucket scaled by tier | Phase 1-2 |
-| 5 | In-process permission cache added to the guard | Phase 1 |
-| 6 | Migrate the first client app off Cloudinary and Supabase Auth | Phases 1-5 complete and tested |
-| 7 | Upgrade Render to Starter tier | Triggered by real user traffic, independent of phase completion |
-| 8 (deferred) | DataModule — Railway Postgres/Redis for client-managed databases and real caching | Not started until a project needs it |
-| 9 (deferred) | Row-level permission granularity | Only when a second project requires it |
+| Phase        | Scope                                                                                                  | Depends On                                                      |
+| ------------ | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
+| 0            | Schema finalized, Supabase project created, secrets set, empty app deployed                            | —                                                               |
+| 1            | AuthModule: guard, Clerk adapter, `/v1/auth/*`, call logging                                           | Phase 0                                                         |
+| 2            | StorageModule: R2 adapter, prefix isolation, `/v1/storage/*`, byte + direction logging                 | Phase 0, reuses Phase 1's guard/interceptor                     |
+| 3            | Metering: sum `call_logs.bytes` per project against pricing tiers, 80/90/100% thresholds, overage calc | Phase 2                                                         |
+| 4            | Rate limiting: per-project token bucket scaled by tier                                                 | Phase 1-2                                                       |
+| 5            | In-process permission cache added to the guard                                                         | Phase 1                                                         |
+| 6            | Migrate the first client app off Cloudinary and Supabase Auth                                          | Phases 1-5 complete and tested                                  |
+| 7            | Upgrade Render to Starter tier                                                                         | Triggered by real user traffic, independent of phase completion |
+| 8 (deferred) | DataModule — Railway Postgres/Redis for client-managed databases and real caching                      | Not started until a project needs it                            |
+| 9 (deferred) | Row-level permission granularity                                                                       | Only when a second project requires it                          |
 
 Phases 1 and 2 can build in parallel once Phase 0 is locked — they share the guard/interceptor but touch different adapters. Phase 6 does not start before 1-5 are solid — the platform's only production client depends on metering and rate limiting already working correctly.
 
