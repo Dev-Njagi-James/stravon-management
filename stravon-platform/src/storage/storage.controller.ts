@@ -4,9 +4,10 @@ import {
   Get,
   Patch,
   Delete,
-  Param,
+  Query,
   Body,
   Req,
+  BadRequestException,
 } from '@nestjs/common';
 
 import { R2Adapter } from './adapters/r2.adapter';
@@ -48,16 +49,19 @@ export class StorageController {
   }
 
   /**
-   * GET /v1/storage/files/:key
+   * GET /v1/storage/files?key=...
    * Generate a presigned download URL.
    * Client then GETs the file bytes directly from the returned downloadUrl.
    */
-  @Get('files/:key(.*)')
+  @Get('files')
   @RequirePermission('storage', 'read')
   async readFile(
     @Req() request: AuthenticatedRequest,
-    @Param('key') key: string,
+    @Query('key') key: string,
   ): Promise<PresignedDownloadResult> {
+    if (!key) {
+      throw new BadRequestException('key query parameter is required');
+    }
     this.r2Adapter.validateKeyOwnership(key, request.project_id);
     // Extract filename from the key: {projectId}/uploads/{filename}
     const parts = key.split('/');
@@ -73,17 +77,20 @@ export class StorageController {
   }
 
   /**
-   * PATCH /v1/storage/files/:key
+   * PATCH /v1/storage/files?key=...
    * Generate a presigned URL to replace/overwrite an existing file.
    * Client then PUTs the new file bytes directly to the returned uploadUrl.
    */
-  @Patch('files/:key(.*)')
+  @Patch('files')
   @RequirePermission('storage', 'modify')
   async modifyFile(
     @Req() request: AuthenticatedRequest,
-    @Param('key') key: string,
+    @Query('key') key: string,
     @Body() body: { filename?: string; contentType: string; fileSize?: number },
   ): Promise<PresignedUploadResult> {
+    if (!key) {
+      throw new BadRequestException('key query parameter is required');
+    }
     this.r2Adapter.validateKeyOwnership(key, request.project_id);
     const filename = body.filename ?? key.split('/').pop()!;
     request.storage_metadata = {
@@ -99,15 +106,18 @@ export class StorageController {
   }
 
   /**
-   * DELETE /v1/storage/files/:key
+   * DELETE /v1/storage/files?key=...
    * Delete a file from R2.
    */
-  @Delete('files/:key(.*)')
+  @Delete('files')
   @RequirePermission('storage', 'delete')
   async deleteFile(
     @Req() request: AuthenticatedRequest,
-    @Param('key') key: string,
+    @Query('key') key: string,
   ): Promise<{ success: boolean; key: string }> {
+    if (!key) {
+      throw new BadRequestException('key query parameter is required');
+    }
     this.r2Adapter.validateKeyOwnership(key, request.project_id);
     const parts = key.split('/');
     const filename = parts[parts.length - 1];
@@ -116,15 +126,18 @@ export class StorageController {
   }
 
   /**
-   * GET /v1/storage/files/:key/info
+   * GET /v1/storage/files/info?key=...
    * Get file metadata (head object).
    */
-  @Get('files/:key/info')
+  @Get('files/info')
   @RequirePermission('storage', 'read')
   async getFileInfo(
     @Req() request: AuthenticatedRequest,
-    @Param('key') key: string,
+    @Query('key') key: string,
   ): Promise<StorageFileInfo> {
+    if (!key) {
+      throw new BadRequestException('key query parameter is required');
+    }
     this.r2Adapter.validateKeyOwnership(key, request.project_id);
     const parts = key.split('/');
     const filename = parts[parts.length - 1];

@@ -1,5 +1,5 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
-import { createClerkClient, ClerkClient } from '@clerk/backend';
+import { createClerkClient, ClerkClient, User } from '@clerk/backend';
 
 export interface ClerkUser {
   id: string;
@@ -80,7 +80,7 @@ export class ClerkAdapter implements OnModuleInit {
     return Promise.race([promise, timeoutPromise]);
   }
 
-  private normalizeUser(raw: any): ClerkUser {
+  private normalizeUser(raw: User): ClerkUser {
     return {
       id: raw.id,
       email:
