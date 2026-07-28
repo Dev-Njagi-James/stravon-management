@@ -7,6 +7,7 @@ import {
   HeadObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { randomUUID } from 'crypto';
 
 export interface StorageFileInfo {
   key: string;
@@ -20,6 +21,7 @@ export interface PresignedUploadResult {
   uploadUrl: string;
   publicUrl: string;
   key: string;
+  uuid: string;
   filename: string;
 }
 
@@ -68,8 +70,9 @@ export class R2Adapter implements OnModuleInit {
 
   /**
    * Generate a presigned upload URL for a file.
-   * The key is constructed as: {projectId}/uploads/{filename}
+   * The key is constructed as: {projectId}/uploads/{uuid}
    * This enforces prefix isolation: every file lives under the project's own prefix.
+   * The original filename (if any) is stored as R2 object metadata, not in the key.
    */
   async getPresignedUploadUrl(
     projectId: string,
@@ -77,8 +80,69 @@ export class R2Adapter implements OnModuleInit {
     contentType: string,
     fileSize?: number,
   ): Promise<PresignedUploadResult> {
-    const key = this.buildKey(projectId, filename);
+    const uuid = randomUUID();
+    const key = this.buildKey(projectId, uuid);
 
+    const command = new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      ContentType: contentType,
+      CacheControl: 'public, max-age=31536000, immutable',
+      Metadata: {
+        originalFilename: filename,
+      },
+      ...(fileSize !== undefined ? { ContentLength: fileSize } : {}),
+    });
+
+    const uploadUrl = await this.withTimeout(
+      getSignedUrl(this.client!, command, { expiresIn: this.defaultExpiry }),
+    );
+
+    return {
+      uploadUrl,
+      publicUrl: `${this.publicUrlBase}/${key}`,
+      key,
+      uuid,
+      filename,
+    };
+  }
+
+  /**
+   * Generate a presigned download URL for a file given its full key.
+   */
+  async getPresignedDownloadUrl(
+    key: string,
+  ): Promise<PresignedDownloadResult> {
+    const command = new GetObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+    });
+
+    const downloadUrl = await this.withTimeout(
+      getSignedUrl(this.client!, command, { expiresIn: this.defaultExpiry }),
+    );
+
+    // Extract filename from the key: {projectId}/uploads/{uuid}
+    const parts = key.split('/');
+    const filename = parts[parts.length - 1];
+
+    return {
+      downloadUrl,
+      publicUrl: `${this.publicUrlBase}/${key}`,
+      key,
+      filename,
+    };
+  }
+
+  /**
+   * Generate a presigned upload URL for replacing an existing file.
+   * Uses the provided key as-is — no new UUID generated for replace.
+   */
+  async getPresignedReplaceUrl(
+    key: string,
+    contentType: string,
+    fileSize?: number,
+  ): Promise<PresignedUploadResult> {
     const command = new PutObjectCommand({
       Bucket: this.bucket,
       Key: key,
@@ -91,65 +155,23 @@ export class R2Adapter implements OnModuleInit {
       getSignedUrl(this.client!, command, { expiresIn: this.defaultExpiry }),
     );
 
+    // Extract filename from the key: {projectId}/uploads/{uuid}
+    const parts = key.split('/');
+    const filename = parts[parts.length - 1];
+
     return {
       uploadUrl,
       publicUrl: `${this.publicUrlBase}/${key}`,
       key,
+      uuid: filename,
       filename,
     };
   }
 
   /**
-   * Generate a presigned download URL for a file.
+   * Delete a file from R2 given its full key.
    */
-  async getPresignedDownloadUrl(
-    projectId: string,
-    filename: string,
-  ): Promise<PresignedDownloadResult> {
-    const key = this.buildKey(projectId, filename);
-
-    const command = new GetObjectCommand({
-      Bucket: this.bucket,
-      Key: key,
-    });
-
-    const downloadUrl = await this.withTimeout(
-      getSignedUrl(this.client!, command, { expiresIn: this.defaultExpiry }),
-    );
-
-    return {
-      downloadUrl,
-      publicUrl: `${this.publicUrlBase}/${key}`,
-      key,
-      filename,
-    };
-  }
-
-  /**
-   * Generate a presigned upload URL for replacing/renaming an existing file.
-   * If renaming, the old file should be deleted separately.
-   */
-  async getPresignedReplaceUrl(
-    projectId: string,
-    filename: string,
-    contentType: string,
-    fileSize?: number,
-  ): Promise<PresignedUploadResult> {
-    // Same as upload — PUT on the new key overwrites
-    return this.getPresignedUploadUrl(
-      projectId,
-      filename,
-      contentType,
-      fileSize,
-    );
-  }
-
-  /**
-   * Delete a file from R2.
-   */
-  async deleteFile(projectId: string, filename: string): Promise<void> {
-    const key = this.buildKey(projectId, filename);
-
+  async deleteFile(key: string): Promise<void> {
     const command = new DeleteObjectCommand({
       Bucket: this.bucket,
       Key: key,
@@ -159,14 +181,9 @@ export class R2Adapter implements OnModuleInit {
   }
 
   /**
-   * Get file metadata (head object).
+   * Get file metadata (head object) given its full key.
    */
-  async getFileInfo(
-    projectId: string,
-    filename: string,
-  ): Promise<StorageFileInfo> {
-    const key = this.buildKey(projectId, filename);
-
+  async getFileInfo(key: string): Promise<StorageFileInfo> {
     const command = new HeadObjectCommand({
       Bucket: this.bucket,
       Key: key,
@@ -174,37 +191,41 @@ export class R2Adapter implements OnModuleInit {
 
     const response = await this.withTimeout(this.client!.send(command));
 
+    // Extract filename (uuid) from the key: {projectId}/uploads/{uuid}
+    const parts = key.split('/');
+    const filename = parts[parts.length - 1];
+
     return {
       key,
       filename,
-      projectId,
+      projectId: parts[0],
       contentType: response.ContentType ?? 'application/octet-stream',
       contentLength: response.ContentLength ?? 0,
     };
   }
 
   /**
-   * Build the full R2 key with prefix isolation: {projectId}/uploads/{filename}
-   * @throws Error if filename contains path traversal
+   * Build the full R2 key with prefix isolation: {projectId}/uploads/{segment}
+   * @throws Error if segment contains path traversal
    */
-  private buildKey(projectId: string, filename: string): string {
-    this.assertNoPathTraversal(filename);
-    return `${projectId}/uploads/${filename}`;
+  private buildKey(projectId: string, segment: string): string {
+    this.assertNoPathTraversal(segment);
+    return `${projectId}/uploads/${segment}`;
   }
 
   /**
-   * Reject filenames containing path traversal sequences.
+   * Reject segments containing path traversal sequences.
    * This prevents a caller from escaping their own prefix.
    */
-  private assertNoPathTraversal(filename: string): void {
+  private assertNoPathTraversal(segment: string): void {
     if (
-      !filename ||
-      filename.includes('..') ||
-      filename.includes('/') ||
-      filename.includes('\\')
+      !segment ||
+      segment.includes('..') ||
+      segment.includes('/') ||
+      segment.includes('\\')
     ) {
       throw new Error(
-        `Invalid filename: path traversal detected in "${filename}"`,
+        `Invalid segment: path traversal detected in "${segment}"`,
       );
     }
   }

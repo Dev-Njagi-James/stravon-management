@@ -63,13 +63,7 @@ export class StorageController {
       throw new BadRequestException('key query parameter is required');
     }
     this.r2Adapter.validateKeyOwnership(key, request.project_id);
-    // Extract filename from the key: {projectId}/uploads/{filename}
-    const parts = key.split('/');
-    const filename = parts[parts.length - 1];
-    const result = await this.r2Adapter.getPresignedDownloadUrl(
-      request.project_id,
-      filename,
-    );
+    const result = await this.r2Adapter.getPresignedDownloadUrl(key);
     request.storage_metadata = {
       bytes_direction: 'download',
     };
@@ -86,20 +80,18 @@ export class StorageController {
   async modifyFile(
     @Req() request: AuthenticatedRequest,
     @Query('key') key: string,
-    @Body() body: { filename?: string; contentType: string; fileSize?: number },
+    @Body() body: { contentType: string; fileSize?: number },
   ): Promise<PresignedUploadResult> {
     if (!key) {
       throw new BadRequestException('key query parameter is required');
     }
     this.r2Adapter.validateKeyOwnership(key, request.project_id);
-    const filename = body.filename ?? key.split('/').pop()!;
     request.storage_metadata = {
       bytes: body.fileSize,
       bytes_direction: 'upload',
     };
     return this.r2Adapter.getPresignedReplaceUrl(
-      request.project_id,
-      filename,
+      key,
       body.contentType,
       body.fileSize,
     );
@@ -119,9 +111,7 @@ export class StorageController {
       throw new BadRequestException('key query parameter is required');
     }
     this.r2Adapter.validateKeyOwnership(key, request.project_id);
-    const parts = key.split('/');
-    const filename = parts[parts.length - 1];
-    await this.r2Adapter.deleteFile(request.project_id, filename);
+    await this.r2Adapter.deleteFile(key);
     return { success: true, key };
   }
 
@@ -139,9 +129,7 @@ export class StorageController {
       throw new BadRequestException('key query parameter is required');
     }
     this.r2Adapter.validateKeyOwnership(key, request.project_id);
-    const parts = key.split('/');
-    const filename = parts[parts.length - 1];
-    const info = await this.r2Adapter.getFileInfo(request.project_id, filename);
+    const info = await this.r2Adapter.getFileInfo(key);
     request.storage_metadata = {
       bytes: info.contentLength,
       bytes_direction: 'download',
