@@ -72,6 +72,7 @@ export class StorageController {
     const result = await this.r2Adapter.getPresignedDownloadUrl(key);
     request.storage_metadata = {
       bytes_direction: 'download',
+      key,
     };
     return result;
   }
@@ -95,6 +96,7 @@ export class StorageController {
     request.storage_metadata = {
       bytes: body.fileSize,
       bytes_direction: 'upload',
+      key,
     };
     return this.r2Adapter.getPresignedReplaceUrl(
       key,
@@ -118,6 +120,7 @@ export class StorageController {
     }
     this.r2Adapter.validateKeyOwnership(key, request.project_id);
     await this.r2Adapter.deleteFile(key);
+    request.storage_metadata = { key, bytes_direction: 'delete' };
     return { success: true, key };
   }
 

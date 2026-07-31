@@ -15,7 +15,7 @@ export interface AuthenticatedRequest extends Request {
   permissions: Record<string, string[]>;
   storage_metadata?: {
     bytes?: number;
-    bytes_direction?: 'upload' | 'download';
+    bytes_direction?: 'upload' | 'download' | 'delete';
     key?: string;
   };
   skip_call_logging?: boolean;
