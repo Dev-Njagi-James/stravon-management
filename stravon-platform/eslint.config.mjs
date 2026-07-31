@@ -20,7 +20,7 @@ export default tseslint.config(
       sourceType: 'commonjs',
       parserOptions: {
         projectService: {
-          allowDefaultProject: ['test-db.js'],
+          allowDefaultProject: ['test-db.js', 'test/verify-storage-round-trip.ts'],
         },
         tsconfigRootDir: import.meta.dirname,
       },

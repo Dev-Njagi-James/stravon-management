@@ -16,7 +16,9 @@ export interface AuthenticatedRequest extends Request {
   storage_metadata?: {
     bytes?: number;
     bytes_direction?: 'upload' | 'download';
+    key?: string;
   };
+  skip_call_logging?: boolean;
 }
 
 interface CacheEntry {

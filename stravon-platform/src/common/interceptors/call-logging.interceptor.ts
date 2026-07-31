@@ -58,6 +58,10 @@ export class CallLoggingInterceptor implements NestInterceptor {
     status: 'success' | 'error',
     latencyMs: number,
   ): Promise<void> {
+    if (request.skip_call_logging) {
+      return;
+    }
+
     if (!request.project_id) {
       return;
     }
@@ -77,6 +81,9 @@ export class CallLoggingInterceptor implements NestInterceptor {
       }
       if (request.storage_metadata.bytes_direction !== undefined) {
         insertBody.bytes_direction = request.storage_metadata.bytes_direction;
+      }
+      if (request.storage_metadata.key !== undefined) {
+        insertBody.storage_key = request.storage_metadata.key;
       }
     }
 

@@ -110,9 +110,7 @@ export class R2Adapter implements OnModuleInit {
   /**
    * Generate a presigned download URL for a file given its full key.
    */
-  async getPresignedDownloadUrl(
-    key: string,
-  ): Promise<PresignedDownloadResult> {
+  async getPresignedDownloadUrl(key: string): Promise<PresignedDownloadResult> {
     const command = new GetObjectCommand({
       Bucket: this.bucket,
       Key: key,

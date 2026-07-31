@@ -8,8 +8,9 @@ import {
   Body,
   Req,
   BadRequestException,
+  NotFoundException,
 } from '@nestjs/common';
-
+import { SupabaseService } from '../common/supabase/supabase.service';
 import { R2Adapter } from './adapters/r2.adapter';
 import type {
   PresignedUploadResult,
@@ -23,7 +24,10 @@ export const PERMISSION_KEY = 'permission';
 
 @Controller('v1/storage')
 export class StorageController {
-  constructor(private readonly r2Adapter: R2Adapter) {}
+  constructor(
+    private readonly r2Adapter: R2Adapter,
+    private readonly supabaseService: SupabaseService,
+  ) {}
 
   /**
    * POST /v1/storage/files
@@ -36,16 +40,18 @@ export class StorageController {
     @Req() request: AuthenticatedRequest,
     @Body() body: { filename: string; contentType: string; fileSize?: number },
   ): Promise<PresignedUploadResult> {
-    request.storage_metadata = {
-      bytes: body.fileSize,
-      bytes_direction: 'upload',
-    };
-    return this.r2Adapter.getPresignedUploadUrl(
+    const result = await this.r2Adapter.getPresignedUploadUrl(
       request.project_id,
       body.filename,
       body.contentType,
       body.fileSize,
     );
+    request.storage_metadata = {
+      bytes: body.fileSize,
+      bytes_direction: 'upload',
+      key: result.key,
+    };
+    return result;
   }
 
   /**
@@ -135,5 +141,67 @@ export class StorageController {
       bytes_direction: 'download',
     };
     return info;
+  }
+
+  /**
+   * POST /v1/storage/files/complete
+   * Confirm an upload has completed and update the original call_logs
+   * row from the corresponding POST /v1/storage/files request with the
+   * real, verified byte count from R2 (HeadObject).
+   *
+   * This route does NOT create a second call_logs row for the same upload.
+   * CallLoggingInterceptor is configured to skip insertion when
+   * request.skip_call_logging is set.
+   */
+  @Post('files/complete')
+  @RequirePermission('storage', 'create')
+  async completeUpload(
+    @Req() request: AuthenticatedRequest,
+    @Body() body: { key: string },
+  ): Promise<{ verified: boolean; bytes: number }> {
+    if (!body.key) {
+      throw new BadRequestException('key is required in request body');
+    }
+    this.r2Adapter.validateKeyOwnership(body.key, request.project_id);
+
+    let contentLength: number;
+    try {
+      const info = await this.r2Adapter.getFileInfo(body.key);
+      contentLength = info.contentLength;
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error ? err.message : 'R2 HeadObject failed';
+      throw new NotFoundException(
+        `Upload not found or not yet complete: ${message}`,
+      );
+    }
+
+    // Update the most recent successful storage 'create' call_logs row
+    // for this project rather than inserting a duplicate row.
+    const { data: latestLog, error: findError } =
+      await this.supabaseService.client
+        .from('call_logs')
+        .select('log_id')
+        .eq('project_id', request.project_id)
+        .eq('service', 'storage')
+        .eq('action', 'create')
+        .eq('status', 'success')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single();
+
+    if (!findError && latestLog) {
+      await this.supabaseService.client
+        .from('call_logs')
+        .update({ bytes: contentLength })
+        .eq('log_id', latestLog.log_id);
+    }
+
+    // Prevent CallLoggingInterceptor from writing a second row for this
+    // completion request — the upload is already represented by the
+    // updated row above.
+    request.skip_call_logging = true;
+
+    return { verified: true, bytes: contentLength };
   }
 }

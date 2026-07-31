@@ -17,7 +17,7 @@
  */
 
 import { createHash, randomUUID } from 'crypto';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import * as dotenv from 'dotenv';
 
 dotenv.config();
@@ -196,10 +196,10 @@ async function main() {
   }
   console.log('   OK: File uploaded successfully to R2');
 
-  // ── 2. GET /v1/storage/files/:key — download ───────────────────────
-  console.log('\n2. GET /v1/storage/files/:key (download URL)...');
+  // ── 2. GET /v1/storage/files?key=... — download ───────────────────────
+  console.log('\n2. GET /v1/storage/files?key=... (download URL)...');
   const downloadRes = await apiFetch(
-    `/v1/storage/files/${encodeURIComponent(createdKey)}`,
+    `/v1/storage/files?key=${encodeURIComponent(createdKey)}`,
     {
       method: 'GET',
       headers: { 'x-api-key': projectAApiKey },
@@ -246,12 +246,12 @@ async function main() {
   }
   console.log('   OK: Byte-for-byte match confirmed');
 
-  // ── 3. PATCH /v1/storage/files/:key — replace content ──────────────
+  // ── 3. PATCH /v1/storage/files?key=... — replace content ──────────────
   console.log(
-    '\n3. PATCH /v1/storage/files/:key (replace via presigned URL)...',
+    '\n3. PATCH /v1/storage/files?key=... (replace via presigned URL)...',
   );
   const replaceRes = await apiFetch(
-    `/v1/storage/files/${encodeURIComponent(createdKey)}`,
+    `/v1/storage/files?key=${encodeURIComponent(createdKey)}`,
     {
       method: 'PATCH',
       headers: {
@@ -324,10 +324,10 @@ async function main() {
   }
   console.log('   OK: Replaced content matches');
 
-  // ── 4. DELETE /v1/storage/files/:key ───────────────────────────────
-  console.log('\n4. DELETE /v1/storage/files/:key...');
+  // ── 4. DELETE /v1/storage/files?key=... ───────────────────────────────
+  console.log('\n4. DELETE /v1/storage/files?key=...');
   const deleteRes = await apiFetch(
-    `/v1/storage/files/${encodeURIComponent(createdKey)}`,
+    `/v1/storage/files?key=${encodeURIComponent(createdKey)}`,
     {
       method: 'DELETE',
       headers: { 'x-api-key': projectAApiKey },
@@ -356,7 +356,7 @@ async function main() {
   // Verify deletion — GET should now fail (404 from R2 presigned)
   console.log('\n   Verifying file is gone (GET should return error)...');
   const afterDeleteRes = await apiFetch(
-    `/v1/storage/files/${encodeURIComponent(createdKey)}`,
+    `/v1/storage/files?key=${encodeURIComponent(createdKey)}`,
     {
       method: 'GET',
       headers: { 'x-api-key': projectAApiKey },
@@ -428,7 +428,7 @@ async function main() {
 
   // Try to access it with Project B's key — should get 403
   const crossRes = await apiFetch(
-    `/v1/storage/files/${encodeURIComponent(tempCreateRes.data.key)}`,
+    `/v1/storage/files?key=${encodeURIComponent(tempCreateRes.data.key)}`,
     {
       method: 'GET',
       headers: { 'x-api-key': projectBApiKey },
@@ -600,7 +600,7 @@ async function main() {
  * call_logs entries are intentionally left for audit.
  */
 async function cleanup(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient<any, 'public', any>,
   ...projectIds: (string | undefined)[]
 ) {
   for (const id of projectIds) {
