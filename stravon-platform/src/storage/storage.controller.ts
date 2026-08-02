@@ -9,6 +9,7 @@ import {
   Req,
   BadRequestException,
   NotFoundException,
+  InternalServerErrorException,
 } from '@nestjs/common';
 import { SupabaseService } from '../common/supabase/supabase.service';
 import { R2Adapter } from './adapters/r2.adapter';
@@ -179,8 +180,7 @@ export class StorageController {
       );
     }
 
-    // Update the most recent successful storage 'create' call_logs row
-    // for this project rather than inserting a duplicate row.
+    // Update the matching storage 'create' call_logs row for this upload.
     const { data: latestLog, error: findError } =
       await this.supabaseService.client
         .from('call_logs')
@@ -189,15 +189,24 @@ export class StorageController {
         .eq('service', 'storage')
         .eq('action', 'create')
         .eq('status', 'success')
-        .order('created_at', { ascending: false })
-        .limit(1)
+        .eq('storage_key', body.key)
         .single();
 
-    if (!findError && latestLog) {
-      await this.supabaseService.client
-        .from('call_logs')
-        .update({ bytes: contentLength })
-        .eq('log_id', latestLog.log_id);
+    if (findError || !latestLog) {
+      throw new NotFoundException(
+        `No matching call_logs create row found for project_id ${request.project_id} and storage_key ${body.key}`,
+      );
+    }
+
+    const { error: updateError } = await this.supabaseService.client
+      .from('call_logs')
+      .update({ bytes: contentLength })
+      .eq('log_id', latestLog.log_id);
+
+    if (updateError) {
+      throw new InternalServerErrorException(
+        `Failed to update call_logs row ${latestLog.log_id} with verified byte count`,
+      );
     }
 
     // Prevent CallLoggingInterceptor from writing a second row for this
