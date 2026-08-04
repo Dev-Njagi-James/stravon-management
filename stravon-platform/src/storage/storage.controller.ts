@@ -9,7 +9,6 @@ import {
   Req,
   BadRequestException,
   NotFoundException,
-  InternalServerErrorException,
 } from '@nestjs/common';
 import { SupabaseService } from '../common/supabase/supabase.service';
 import { R2Adapter } from './adapters/r2.adapter';
@@ -168,6 +167,45 @@ export class StorageController {
     }
     this.r2Adapter.validateKeyOwnership(body.key, request.project_id);
 
+    // Update the matching storage call_logs row for this upload. This covers
+    // rows originated by both 'create' (POST) and 'modify' (PATCH) actions,
+    // which are linked the same way by project_id + storage_key. The query is
+    // narrowed to those actions and ordered by created_at desc with limit 1 so
+    // it can't match a read/delete row on the same key and won't throw on
+    // multiple qualifying rows.
+    const { data: latestLogs, error: findError } =
+      await this.supabaseService.client
+        .from('call_logs')
+        .select('log_id, bytes, completed_at')
+        .eq('project_id', request.project_id)
+        .eq('service', 'storage')
+        .in('action', ['create', 'modify'])
+        .eq('status', 'success')
+        .eq('storage_key', body.key)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+    const latestLog:
+      | {
+          log_id: string;
+          bytes: number | null;
+          completed_at: string | null;
+        }
+      | undefined = latestLogs?.[0];
+
+    if (findError || !latestLog) {
+      throw new NotFoundException(
+        `No matching call_logs create/modify row found for project_id ${request.project_id} and storage_key ${body.key}`,
+      );
+    }
+
+    // Idempotency: if this row was already completed, return the stored bytes
+    // without re-running the R2 HeadObject or re-updating the row.
+    if (latestLog.completed_at) {
+      request.skip_call_logging = true;
+      return { verified: true, bytes: latestLog.bytes ?? 0 };
+    }
+
     let contentLength: number;
     try {
       const info = await this.r2Adapter.getFileInfo(body.key);
@@ -180,32 +218,18 @@ export class StorageController {
       );
     }
 
-    // Update the matching storage 'create' call_logs row for this upload.
-    const { data: latestLog, error: findError } =
-      await this.supabaseService.client
-        .from('call_logs')
-        .select('log_id')
-        .eq('project_id', request.project_id)
-        .eq('service', 'storage')
-        .eq('action', 'create')
-        .eq('status', 'success')
-        .eq('storage_key', body.key)
-        .single();
-
-    if (findError || !latestLog) {
-      throw new NotFoundException(
-        `No matching call_logs create row found for project_id ${request.project_id} and storage_key ${body.key}`,
-      );
-    }
-
     const { error: updateError } = await this.supabaseService.client
       .from('call_logs')
-      .update({ bytes: contentLength })
+      .update({ bytes: contentLength, completed_at: new Date().toISOString() })
       .eq('log_id', latestLog.log_id);
 
     if (updateError) {
-      throw new InternalServerErrorException(
-        `Failed to update call_logs row ${latestLog.log_id} with verified byte count`,
+      // The client already has confirmation the upload succeeded. A
+      // metering-side write failure should not surface as an error to the
+      // client, but it must be visible server-side.
+      console.error(
+        `[storage/complete] Failed to update call_logs row ${latestLog.log_id} with verified byte count:`,
+        updateError,
       );
     }
 
