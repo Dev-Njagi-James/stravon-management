@@ -4,14 +4,18 @@ import {
   ExecutionContext,
   UnauthorizedException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { createHash } from 'crypto';
 import { Request } from 'express';
 import { SupabaseService } from '../supabase/supabase.service';
+import { RateLimiterService } from '../rate-limit/rate-limiter.service';
 
 export interface AuthenticatedRequest extends Request {
   project_id: string;
+  tier: string;
   permissions: Record<string, string[]>;
   storage_metadata?: {
     bytes?: number;
@@ -23,6 +27,7 @@ export interface AuthenticatedRequest extends Request {
 
 interface CacheEntry {
   projectId: string;
+  tier: string;
   permissions: Record<string, string[]>;
   expiresAt: number;
 }
@@ -40,6 +45,7 @@ export class ApiKeyGuard implements CanActivate {
   constructor(
     private readonly supabaseService: SupabaseService,
     private readonly reflector: Reflector,
+    private readonly rateLimiterService: RateLimiterService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -56,13 +62,15 @@ export class ApiKeyGuard implements CanActivate {
     const cached = this.cache.get(hash);
     if (cached && Date.now() < cached.expiresAt) {
       request.project_id = cached.projectId;
+      request.tier = cached.tier;
       request.permissions = cached.permissions;
-      return this.checkPermission(context, request);
+      this.checkPermission(context, request);
+      return this.checkRateLimit(request);
     }
 
     const { data, error } = await this.supabaseService.client
       .from('projects')
-      .select('project_id, permissions')
+      .select('project_id, tier, permissions')
       .eq('api_key_hash', hash)
       .single();
 
@@ -72,18 +80,22 @@ export class ApiKeyGuard implements CanActivate {
     }
 
     const projectId = data.project_id as string;
+    const tier = data.tier as string;
     const permissions = (data.permissions ?? {}) as Record<string, string[]>;
 
     // Populate cache
     this.cache.set(hash, {
       projectId,
+      tier,
       permissions,
       expiresAt: Date.now() + this.ttlMs,
     });
 
     request.project_id = projectId;
+    request.tier = tier;
     request.permissions = permissions;
-    return this.checkPermission(context, request);
+    this.checkPermission(context, request);
+    return this.checkRateLimit(request);
   }
 
   private checkPermission(
@@ -109,5 +121,24 @@ export class ApiKeyGuard implements CanActivate {
     }
 
     return true;
+  }
+
+  private checkRateLimit(request: AuthenticatedRequest): boolean {
+    const result = this.rateLimiterService.consumeToken(
+      request.project_id,
+      request.tier,
+    );
+
+    if (result.allowed) {
+      return true;
+    }
+
+    const retryAfterSec = Math.ceil((result.retryAfterMs ?? 0) / 1000);
+    request.res?.setHeader('Retry-After', String(retryAfterSec));
+
+    throw new HttpException(
+      { error: 'rate_limit_exceeded', retryAfterMs: result.retryAfterMs },
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
   }
 }
