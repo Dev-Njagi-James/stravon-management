@@ -65,7 +65,7 @@ export class ApiKeyGuard implements CanActivate {
       request.tier = cached.tier;
       request.permissions = cached.permissions;
       this.checkPermission(context, request);
-      return this.checkRateLimit(request);
+      return this.checkRateLimit(context, request);
     }
 
     const { data, error } = await this.supabaseService.client
@@ -95,7 +95,7 @@ export class ApiKeyGuard implements CanActivate {
     request.tier = tier;
     request.permissions = permissions;
     this.checkPermission(context, request);
-    return this.checkRateLimit(request);
+    return this.checkRateLimit(context, request);
   }
 
   private checkPermission(
@@ -123,7 +123,11 @@ export class ApiKeyGuard implements CanActivate {
     return true;
   }
 
-  private checkRateLimit(request: AuthenticatedRequest): boolean {
+  private checkRateLimit(
+    context: ExecutionContext,
+    request: AuthenticatedRequest,
+  ): boolean {
+    const startTime = Date.now();
     const result = this.rateLimiterService.consumeToken(
       request.project_id,
       request.tier,
@@ -135,6 +139,29 @@ export class ApiKeyGuard implements CanActivate {
 
     const retryAfterSec = Math.ceil((result.retryAfterMs ?? 0) / 1000);
     request.res?.setHeader('Retry-After', String(retryAfterSec));
+
+    const permissionMetadata = this.reflector.get<
+      PermissionMetadata | undefined
+    >('permission', context.getHandler());
+    const service = permissionMetadata?.service ?? 'auth';
+    const action = permissionMetadata?.action ?? 'unknown';
+
+    const latencyMs = Date.now() - startTime;
+
+    this.supabaseService
+      .insertCallLog({
+        project_id: request.project_id,
+        service,
+        action,
+        status: 'throttled',
+        latency_ms: latencyMs,
+        bytes: null,
+        bytes_direction: null,
+        storage_key: null,
+      })
+      .catch((err: unknown) =>
+        console.error('ApiKeyGuard: failed to log throttled', err),
+      );
 
     throw new HttpException(
       { error: 'rate_limit_exceeded', retryAfterMs: result.retryAfterMs },

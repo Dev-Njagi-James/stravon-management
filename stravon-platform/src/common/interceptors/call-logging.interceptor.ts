@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Observable, tap, catchError, throwError } from 'rxjs';
-import { SupabaseService } from '../supabase/supabase.service';
+import { SupabaseService, CallLogEntry } from '../supabase/supabase.service';
 import { AuthenticatedRequest } from '../guards/api-key.guard';
 
 interface PermissionMetadata {
@@ -66,7 +66,7 @@ export class CallLoggingInterceptor implements NestInterceptor {
       return;
     }
 
-    const insertBody: Record<string, unknown> = {
+    const insertBody: CallLogEntry = {
       project_id: request.project_id,
       service,
       action,
@@ -87,12 +87,6 @@ export class CallLoggingInterceptor implements NestInterceptor {
       }
     }
 
-    const { error } = await this.supabaseService.client
-      .from('call_logs')
-      .insert(insertBody);
-
-    if (error) {
-      console.error('CallLoggingInterceptor: insert failed', error);
-    }
+    await this.supabaseService.insertCallLog(insertBody);
   }
 }
