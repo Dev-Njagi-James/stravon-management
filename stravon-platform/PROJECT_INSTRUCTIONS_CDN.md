@@ -39,8 +39,17 @@ No new database, no new hosting provider, no new caching service beyond Cloudfla
 ### 2. Smart Tiered Cache (Cloudflare dashboard, no code)
 - Enable on the zone, scoped to the `cdn` hostname / R2 traffic.
 
-### 3. Cache-Control header (code — R2 adapter)
-- Add `CacheControl: 'public, max-age=31536000, immutable'` to the presign parameters in `createFile` and `modifyFile`. Do not add to `readFile` or `deleteFile` — nothing is being cached-in on those actions.
+### 3. Cache-Control header (code — R2 adapter + client contract)
+
+**Server side:** Add `CacheControl: 'public, max-age=31536000, immutable'` to the presign parameters in `createFile` and `modifyFile`. Do not add to `readFile` or `deleteFile` — nothing is being cached-in on those actions. This alone is NOT sufficient — see below.
+
+**Client side (REQUIRED, not optional):** A presigned URL only encodes a signature; it does not carry header values. `cache-control` is in the SigV4 signer's always-unsignable-header list, so it is never part of the signed request contract by default. The client performing the actual PUT (the SDK's `upload()` method, any manual PUT, and all E2E test scripts) MUST explicitly send the header on the PUT request:
+
+  Cache-Control: public, max-age=31536000, immutable
+
+sent unsigned, alongside `Content-Type` (which already works the same way — R2 accepts it unsigned on presigned PUTs). Without this, R2 stores the object with no `Cache-Control` metadata, GETs return no header, and Cloudflare's edge treats the object as DYNAMIC — never cached — regardless of what was set server-side on the presign command.
+
+Confirmed against live E2E testing 11/8/2026: setting `CacheControl` on the command alone does NOT land it on the stored object. This is a hard requirement on every PUT caller, not a nice-to-have.
 
 ### 4. `publicUrl` generation (code — R2 adapter)
 - Rebuild `publicUrl` to use `https://cdn.stravontechlabs.com/{key}` instead of the current raw R2/account-id URL. Applies everywhere `publicUrl` is constructed: `createFile`, `modifyFile`, and anywhere else it's returned (`completeUpload` response, if applicable — confirm against actual source before editing, do not assume every handler builds it the same way).
