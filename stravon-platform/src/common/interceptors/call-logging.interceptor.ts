@@ -85,6 +85,11 @@ export class CallLoggingInterceptor implements NestInterceptor {
       if (request.storage_metadata.key !== undefined) {
         insertBody.storage_key = request.storage_metadata.key;
       }
+      // Batch-read rows carry the FULL requested-key array in storage_keys,
+      // not a single storage_key. Present only on the batch-read route.
+      if (request.storage_metadata.keys !== undefined) {
+        insertBody.storage_keys = request.storage_metadata.keys;
+      }
     }
 
     await this.supabaseService.insertCallLog(insertBody);

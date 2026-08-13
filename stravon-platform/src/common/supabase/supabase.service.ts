@@ -10,6 +10,7 @@ export interface CallLogEntry {
   bytes?: number | null;
   bytes_direction?: string | null;
   storage_key?: string | null;
+  storage_keys?: string[] | null;
 }
 
 @Injectable()

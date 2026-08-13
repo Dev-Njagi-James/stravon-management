@@ -12,6 +12,7 @@ import { createHash } from 'crypto';
 import { Request } from 'express';
 import { SupabaseService } from '../supabase/supabase.service';
 import { RateLimiterService } from '../rate-limit/rate-limiter.service';
+import { SKIP_SHARED_RATE_LIMIT_KEY } from '../decorators/skip-shared-rate-limit.decorator';
 
 export interface AuthenticatedRequest extends Request {
   project_id: string;
@@ -21,6 +22,9 @@ export interface AuthenticatedRequest extends Request {
     bytes?: number;
     bytes_direction?: 'upload' | 'download' | 'delete';
     key?: string;
+    // Full requested-key array for batch-read rows -> call_logs.storage_keys.
+    // Set only on batch-read; storage_key (singular) stays null on those rows.
+    keys?: string[];
   };
   skip_call_logging?: boolean;
 }
@@ -65,7 +69,9 @@ export class ApiKeyGuard implements CanActivate {
       request.tier = cached.tier;
       request.permissions = cached.permissions;
       this.checkPermission(context, request);
-      return this.checkRateLimit(context, request);
+      return this.shouldSkipSharedRateLimit(context)
+        ? true
+        : this.checkRateLimit(context, request);
     }
 
     const { data, error } = await this.supabaseService.client
@@ -95,7 +101,18 @@ export class ApiKeyGuard implements CanActivate {
     request.tier = tier;
     request.permissions = permissions;
     this.checkPermission(context, request);
-    return this.checkRateLimit(context, request);
+    return this.shouldSkipSharedRateLimit(context)
+      ? true
+      : this.checkRateLimit(context, request);
+  }
+
+  private shouldSkipSharedRateLimit(context: ExecutionContext): boolean {
+    return (
+      this.reflector.get<boolean>(
+        SKIP_SHARED_RATE_LIMIT_KEY,
+        context.getHandler(),
+      ) ?? false
+    );
   }
 
   private checkPermission(

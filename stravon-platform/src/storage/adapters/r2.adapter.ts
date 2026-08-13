@@ -32,6 +32,17 @@ export interface PresignedDownloadResult {
   filename: string;
 }
 
+// A single entry in a batch-read response. Represents either a successful
+// resolution (same fields as the existing GET /v1/storage/files response) or
+// an error entry (cross_project / not_found / rate_limit_exceeded).
+export interface BatchReadResultEntry {
+  key: string;
+  downloadUrl?: string;
+  publicUrl?: string;
+  filename?: string;
+  error?: string;
+}
+
 @Injectable()
 export class R2Adapter implements OnModuleInit {
   private client: S3Client | null = null;
@@ -281,6 +292,53 @@ export class R2Adapter implements OnModuleInit {
       );
       return undefined;
     }
+  }
+
+  /**
+   * Resolve a single key for batch read without throwing — returns an entry
+   * object that the caller places directly into the batch response.
+   *
+   * Reuses the SAME prefix-isolation logic as the single-read route
+   * (validateKeyOwnership) and the same key-resolution path as the single-read
+   * route (getPresignedDownloadUrl which produces downloadUrl/publicUrl/filename).
+   * Unlike the single-read handlers, a key outside the caller's project_id
+   * prefix yields { key, error: 'cross_project' } and a key that doesn't exist
+   * in R2 yields { key, error: 'not_found' } — neither rejects the batch.
+   */
+  async resolveBatchRead(
+    key: string,
+    projectId: string,
+  ): Promise<BatchReadResultEntry> {
+    // Prefix isolation — same check the GET /v1/storage/files route performs.
+    const expectedPrefix = `${projectId}/uploads/`;
+    if (!key.startsWith(expectedPrefix)) {
+      return { key, error: 'cross_project' };
+    }
+
+    // Confirm the object exists before generating a download URL. A HeadObject
+    // failure here means the key doesn't resolve to a real R2 object.
+    try {
+      await this.withTimeout(
+        this.client!.send(
+          new HeadObjectCommand({ Bucket: this.bucket, Key: key }),
+        ),
+      );
+    } catch (err) {
+      console.error(
+        `[r2] resolveBatchRead: HeadObject failed for ${key}:`,
+        err instanceof Error ? err.message : err,
+      );
+      return { key, error: 'not_found' };
+    }
+
+    // Same resolution as the single-read route.
+    const result = await this.getPresignedDownloadUrl(key);
+    return {
+      key: result.key,
+      downloadUrl: result.downloadUrl,
+      publicUrl: result.publicUrl,
+      filename: result.filename,
+    };
   }
 
   /**

@@ -9,6 +9,8 @@ import {
   Req,
   BadRequestException,
   NotFoundException,
+  HttpException,
+  HttpStatus,
 } from '@nestjs/common';
 import { SupabaseService } from '../common/supabase/supabase.service';
 import { R2Adapter } from './adapters/r2.adapter';
@@ -16,9 +18,12 @@ import type {
   PresignedUploadResult,
   PresignedDownloadResult,
   StorageFileInfo,
+  BatchReadResultEntry,
 } from './adapters/r2.adapter';
 import type { AuthenticatedRequest } from '../common/guards/api-key.guard';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
+import { SkipSharedRateLimit } from '../common/decorators/skip-shared-rate-limit.decorator';
+import { RateLimiterService } from '../common/rate-limit/rate-limiter.service';
 
 export const PERMISSION_KEY = 'permission';
 
@@ -27,6 +32,7 @@ export class StorageController {
   constructor(
     private readonly r2Adapter: R2Adapter,
     private readonly supabaseService: SupabaseService,
+    private readonly rateLimiterService: RateLimiterService,
   ) {}
 
   /**
@@ -144,6 +150,158 @@ export class StorageController {
       bytes_direction: 'download',
     };
     return info;
+  }
+
+  /**
+   * POST /v1/storage/files/batch-read
+   *
+   * Resolve multiple storage keys at once, returning a presigned download URL
+   * for each. Check order (per reference doc):
+   *   1. ApiKeyGuard (401) — global guard, runs before this handler.
+   *   2. Permission check (403) — @RequirePermission('storage', 'read'),
+   *      one check for the whole batch, done by the guard.
+   *   3. Validation (400) — `keys` missing / empty / > 50. Before rate-limit,
+   *      no tokens consumed on failure.
+   *   4. Batch rate-limit check against batchReadBucket (cost = keys.length).
+   *      - zero tokens available  -> HTTP 429, no results body, Retry-After set.
+   *      - fewer tokens than keys -> consume all available, serve that many
+   *        (deterministic: first N in input order), rest get rate_limit_exceeded.
+   *      - enough tokens          -> consume keys.length, serve everything.
+   *   5. Resolve each served key independently with prefix isolation; a
+   *      cross-project or missing key becomes a results entry, not a rejection.
+   *   6. Assemble { results, retryAfterMs? } with results in original key order.
+   *
+   * This route uses its OWN batchReadBucket via this.rateLimiterService. It is
+   * marked @SkipSharedRateLimit so the global guard does not also consume a
+   * token from the shared storage+auth bucket (which would double-charge and
+   * violate the batch-bucket requirement).
+   */
+  @Post('files/batch-read')
+  @RequirePermission('storage', 'read')
+  @SkipSharedRateLimit()
+  async batchReadFile(
+    @Req() request: AuthenticatedRequest,
+    @Body() body: { keys?: string[] },
+  ): Promise<{
+    results: BatchReadResultEntry[];
+    retryAfterMs?: number;
+  }> {
+    // Handler-entry timestamp, matching how the existing guard/interceptor
+    // measure latency for their own log rows (start at entry, elapsed at log).
+    const startTime = Date.now();
+
+    // Step 3: Validation — before any rate-limit token is consumed.
+    if (!body.keys || !Array.isArray(body.keys) || body.keys.length === 0) {
+      throw new BadRequestException(
+        'keys is required and must be a non-empty array',
+      );
+    }
+
+    const MAX_KEYS = 50;
+    if (body.keys.length > MAX_KEYS) {
+      throw new BadRequestException(
+        `keys must contain at most ${MAX_KEYS} entries`,
+      );
+    }
+
+    // Step 4: Batch rate-limit check. Cost = number of keys requested.
+    const limitResult = this.rateLimiterService.consumeBatchTokens(
+      request.project_id,
+      request.tier,
+      body.keys.length,
+    );
+
+    // 429 — zero tokens available. No results body. Retry-After header set,
+    // matching the existing single-read 429 shape exactly.
+    if (limitResult.consumed === 0) {
+      const retryAfterMs = limitResult.retryAfterMs ?? 0;
+      const retryAfterSec = Math.ceil(retryAfterMs / 1000);
+      request.res?.setHeader('Retry-After', String(retryAfterSec));
+
+      // Log the batchReadBucket's own throttled case: one row, status
+      // 'throttled', full requested-key array in storage_keys. This is NOT the
+      // guard's shared-bucket throttled path (that's a different bucket, logged
+      // separately in ApiKeyGuard.checkRateLimit and left untouched). We set
+      // skip_call_logging so the CallLoggingInterceptor does not also write a
+      // generic 'error' row for this 429.
+      this.supabaseService
+        .insertCallLog({
+          project_id: request.project_id,
+          service: 'storage',
+          action: 'read',
+          status: 'throttled',
+          latency_ms: Date.now() - startTime,
+          bytes: null,
+          bytes_direction: null,
+          storage_key: null,
+          storage_keys: body.keys,
+        })
+        .catch((err: unknown) =>
+          console.error('batchReadFile: failed to log throttled', err),
+        );
+      request.skip_call_logging = true;
+
+      throw new HttpException(
+        { error: 'rate_limit_exceeded', retryAfterMs },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
+    // Populate request storage_metadata BEFORE key resolution so the success
+    // path's interceptor row carries the FULL requested-key array in
+    // storage_keys (not just the served subset). storage_key (singular) stays
+    // null on this row; bytes stays null (nothing transferred at this step).
+    request.storage_metadata = {
+      keys: body.keys,
+    };
+
+    // Deterministic partial serve: the first `consumed` keys (input order) are
+    // served; the remainder are rate_limit_exceeded entries.
+    const servedKeys = body.keys.slice(0, limitResult.consumed);
+
+    // Step 5: Resolve each served key independently, then reorder results to
+    // match the original input order.
+    const servedResults = await Promise.all(
+      servedKeys.map(async (key) =>
+        this.r2Adapter.resolveBatchRead(key, request.project_id),
+      ),
+    );
+
+    const resultsByKey = new Map<string, BatchReadResultEntry>();
+    for (const entry of servedResults) {
+      resultsByKey.set(entry.key, entry);
+    }
+
+    // Partial-serve: remaining keys after the served slice get rate_limit_exceeded.
+    const didPartialServe = limitResult.consumed < body.keys.length;
+    if (didPartialServe) {
+      for (const key of body.keys.slice(limitResult.consumed)) {
+        resultsByKey.set(key, { key, error: 'rate_limit_exceeded' });
+      }
+    }
+
+    // Step 6: Reorder to original input order.
+    const results = body.keys.map((key) => {
+      const entry = resultsByKey.get(key);
+      if (entry) return entry;
+      // Defensive: a served key that produced no entry (should not happen).
+      return { key, error: 'not_found' };
+    });
+
+    // retryAfterMs included only if any keys came back as rate_limit_exceeded.
+    const hasRateLimited = results.some(
+      (r) => r.error === 'rate_limit_exceeded',
+    );
+    const response: {
+      results: BatchReadResultEntry[];
+      retryAfterMs?: number;
+    } = { results };
+
+    if (hasRateLimited) {
+      response.retryAfterMs = limitResult.retryAfterMs;
+    }
+
+    return response;
   }
 
   /**
