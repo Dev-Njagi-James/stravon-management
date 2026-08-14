@@ -52,6 +52,13 @@ export class RateLimiterService {
   // Independent batch-read bucket, keyed per project_id the same way as `buckets`.
   private readonly batchReadBuckets = new Map<string, BucketState>();
 
+  constructor() {
+    console.log(
+      '[RateLimiterService] NEW INSTANCE CREATED',
+      new Date().toISOString(),
+    );
+  }
+
   /**
    * Attempts to consume one token from the project's SHARED bucket.
    * Refills continuously based on elapsed time (standard token bucket, not fixed window).
@@ -61,6 +68,12 @@ export class RateLimiterService {
    * @throws BadRequestException if tier is not a known tier value
    */
   consumeToken(projectId: string, tier: string): RateLimitResult {
+    console.log(
+      '[RateLimiterService] consumeToken called, project:',
+      projectId,
+      'buckets size:',
+      this.buckets.size,
+    );
     const config = TIER_CONFIG[tier as RateLimitTier];
 
     if (!config) {
