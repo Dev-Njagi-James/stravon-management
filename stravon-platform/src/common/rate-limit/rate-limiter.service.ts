@@ -147,7 +147,7 @@ export class RateLimiterService {
     }
 
     const available = bucket.tokens;
-    if (available <= 0) {
+    if (available < 1) {
       // Not enough tokens: compute how long until at least 1 token is available.
       const tokensNeeded = 1 - available;
       const tokensPerMs = config.sustained / 1000;
